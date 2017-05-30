@@ -1,4 +1,14 @@
-module Data.Machine.Plan where
+module Data.Machine.Plan
+  ( PlanT
+  , Plan
+  , runPlanT
+  , runPlan
+  , yield
+  , maybeYield
+  , await
+  , awaits
+  , stop
+  ) where
 
 import Prelude
 
@@ -8,50 +18,42 @@ import Control.Monad.Aff.Class (class MonadAff, liftAff)
 import Control.Monad.Eff.Class (class MonadEff, liftEff)
 import Control.Plus (class Plus, empty)
 import Control.MonadPlus (class MonadZero, class MonadPlus)
-import Control.Monad.Trans.Class (class MonadTrans)
+import Control.Monad.Trans.Class (class MonadTrans, lift)
 
+import Data.Exists (Exists, mkExists, runExists)
 import Data.Identity (Identity)
 import Data.Maybe (Maybe(..))
+import Data.Lazy (Lazy, defer)
 import Data.Newtype (wrap, unwrap)
 
-newtype PlanT k o m a = PlanT
-  (forall r.
-    (a -> m r) ->                                     -- Done a
-    (o -> m r -> m r) ->                              -- Yield o (Plan k o a)
-    (forall z. (z -> m r) -> k z -> m r -> m r) ->    -- forall z. Await (z -> Plan k o a) (k z) (Plan k o a)
-    m r ->                                            -- Fail
-    m r
-  )
+
+newtype PlanT k o m r = PlanT (forall b. (r -> Step k o m b) -> Step k o m b)
 
 type Plan k o a = forall m. PlanT k o m a
 
-runPlanT
-  :: forall k o m a
-   . PlanT k o m a
-  -> (forall r.
-       (a -> m r) ->
-       (o -> m r -> m r) ->
-       (forall z. (z -> m r) -> k z -> m r -> m r) ->
-        m r ->
-        m r)
-runPlanT (PlanT k) = k
+data Step k o m r
+  = Stop
+  | Done r
+  | Yield o (Lazy (Step k o m r))
+  | StepM (m (Step k o m r))
+  | Await (Exists (AwaitX k o m r))
 
-runPlan
-  :: forall k o a r
-   . PlanT k o Identity a
-  -> (a -> r)
-  -> (o -> r -> r)
-  -> (forall z. (z -> r) -> k z -> r -> r)
-  -> r
-  -> r
-runPlan m kp ke kr kf = unwrap $ runPlanT m
-  (wrap <<< kp)
-  (\o r -> wrap (ke o (unwrap r)))
-  (\f k r -> wrap (kr (unwrap <<< f) k (unwrap r)))
-  (wrap kf)
+data AwaitX k o m r t = AwaitX (t -> Step k o m r) (k t) (Lazy (Step k o m r))
+
+unAwait :: forall k o m r a. (forall t. (t -> Step k o m r) -> k t -> Lazy (Step k o m r) -> a) -> Exists (AwaitX k o m r) -> a
+unAwait f = runExists \(AwaitX g kg fg) -> f g kg fg
+
+mkAwait :: forall k o m r t. (t -> Step k o m r) -> k t -> Lazy (Step k o m r) -> Step k o m r
+mkAwait f g = Await <<< mkExists <<< AwaitX f g
+
+unPlanT
+  :: forall k o m r
+   . PlanT k o m r
+  -> (forall b. (r -> Step k o m b) -> Step k o m b)
+unPlanT (PlanT k) = k
 
 yield :: forall k o. o -> Plan k o Unit
-yield o = PlanT (\kp ke _ _ -> ke o (kp unit))
+yield o = PlanT \k -> Yield o (defer \_ -> k unit)
 
 maybeYield :: forall k o. Maybe o -> Plan k o Unit
 maybeYield = case _ of
@@ -59,33 +61,68 @@ maybeYield = case _ of
   Just a  -> yield a
 
 await :: forall k o i. Category k => Plan (k i) o i
-await = PlanT (\kp _ kr kf -> kr kp id kf)
+await = PlanT \k -> mkAwait k id (defer \_ -> Stop)
 
 awaits :: forall k o i. k i -> Plan k o i
-awaits h = PlanT (\kp _ kr -> kr kp h)
+awaits h = PlanT \k -> mkAwait k h (defer \_ -> Stop)
 
 stop :: forall k o a. Plan k o a
 stop = empty
 
+runPlanT
+  :: forall k o m a r. Bind m
+  => PlanT k o m a
+  -> (a -> m r)
+  -> (o -> Lazy (m r) -> m r)
+  -> (forall z. (z -> m r) -> k z -> Lazy (m r) -> m r)
+  -> m r
+  -> m r
+runPlanT (PlanT k) done yi emit fail = go (k Done)
+  where
+  go :: Step k o m a -> m r
+  go = case _ of
+    Done a     -> done a
+    Stop       -> fail
+    Yield o kk -> yi o (map go kk)
+    StepM m    -> m >>= go
+    Await de   -> de # unAwait \fg kg dg -> emit (go <<< fg) kg (map go dg)
+
+runPlan
+  :: forall k o a r
+   . PlanT k o Identity a
+  -> (a -> r)
+  -> (o -> Lazy r -> r)
+  -> (forall z. (z -> r) -> k z -> Lazy r -> r)
+  -> r
+  -> r
+runPlan m kp ke kr kf = unwrap $ runPlanT m
+  (wrap <<< kp)
+  (\o r -> wrap (ke o (map unwrap r)))
+  (\f k r -> wrap (kr (unwrap <<< f) k (map unwrap r)))
+  (wrap kf)
+
 instance functorPlanT :: Functor (PlanT k o m) where
-  map f (PlanT m) = PlanT (\k -> m (k <<< f))
+  map f (PlanT k) = PlanT (\m -> k (m <<< f))
 
 instance applyPlanT :: Apply (PlanT k o m) where
-  apply (PlanT m) (PlanT n) = PlanT (\kp ke kr kf -> m (\f -> n (\a -> kp (f a)) ke kr kf) ke kr kf)
+  apply (PlanT f) (PlanT g) = PlanT (\bfr -> f (\ab -> g (bfr <<< ab)))
 
 instance applicativePlanT :: Applicative (PlanT k o m) where
-  pure a = PlanT \k _ _ _ -> k a
+  pure a = PlanT \k -> k a
 
 instance bindPlanT :: Bind (PlanT k o m) where
-  bind (PlanT m) f = PlanT (\kp ke kr kf -> m (\a -> runPlanT (f a) kp ke kr kf) ke kr kf)
+  bind (PlanT m) k = PlanT (\c -> m (\a -> unPlanT (k a) c))
 
 instance monadPlanT :: Monad (PlanT k o m)
 
 instance altPlanT :: Alt (PlanT k o m) where
-  alt (PlanT m) (PlanT n) = PlanT (\kp ke kr kf -> m kp ke kr (n kp ke kr kf))
+  alt (PlanT m) (PlanT n) = PlanT \k ->
+    case m k of
+      Stop -> n k
+      r    -> r
 
 instance plusPlanT :: Plus (PlanT k o m) where
-  empty = PlanT (\_ _ _ kf -> kf)
+  empty = PlanT \_ -> Stop
 
 instance alternativePlanT :: Alternative (PlanT k o m)
 
@@ -94,10 +131,10 @@ instance monadZeroPlanT :: MonadZero (PlanT k o m)
 instance monadPlusPlanT :: MonadPlus (PlanT k o m)
 
 instance monadTransPlanT :: MonadTrans (PlanT k o) where
-  lift m = PlanT (\kp _ _ _ -> m >>= kp)
+  lift m = PlanT \k -> StepM (k <$> m)
 
 instance monadEffPlanT :: MonadEff eff m => MonadEff eff (PlanT k o m) where
-  liftEff m = PlanT (\kp _ _ _ -> liftEff m >>= kp)
+  liftEff = lift <<< liftEff
 
 instance monadAffPlanT :: MonadAff eff m => MonadAff eff (PlanT k o m) where
-  liftAff m = PlanT (\kp _ _ _ -> liftAff m >>= kp)
+  liftAff = lift <<< liftAff

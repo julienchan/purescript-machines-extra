@@ -22,7 +22,7 @@ import Prelude
 import Control.Monad.Trans.Class (lift)
 
 import Data.Foldable (class Foldable, traverse_, foldr)
-import Data.Machine.Types ( MachineT(..), Machine, Step(..), mkAwait', unAwait'
+import Data.Machine.Machine ( MachineT(..), Machine, Step(..), mkAwait, unAwait
                           , stopped, encased, before, construct)
 import Data.Machine.Is (Is(..), refl)
 import Data.Leibniz (coerceSymm)
@@ -38,7 +38,7 @@ type ProcessT m a b = MachineT m (Is a) b
 echo :: forall a. Process a a
 echo = go
   where
-  go = encased (mkAwait' (\t -> encased (Yield t go)) refl stopped)
+  go = encased (mkAwait (\t -> encased (Yield t go)) refl stopped)
 
 -- | A 'Process' that prepends the elements of a 'Foldable' onto its input, then repeats its input from there.
 prepended :: forall f a. Foldable f => f a -> Process a a
@@ -48,25 +48,25 @@ filtered :: forall a. (a -> Boolean) -> Process a a
 filtered p = go
   where
   go = encased
-         $ mkAwait' (\a -> if p a then encased (Yield a go) else go)
+         $ mkAwait (\a -> if p a then encased (Yield a go) else go)
            refl
            stopped
 
 dropping :: forall a. Int -> Process a a
 dropping cnt
   | cnt <= 0  = echo
-  | otherwise = encased (mkAwait' (\_ -> dropping (cnt - 1)) refl stopped)
+  | otherwise = encased (mkAwait (\_ -> dropping (cnt - 1)) refl stopped)
 
 taking :: forall a. Int -> Process a a
 taking cnt
   | cnt <= 0  = stopped
-  | otherwise = encased (mkAwait' (\v -> encased $ Yield v (taking (cnt - 1))) refl stopped)
+  | otherwise = encased (mkAwait (\v -> encased $ Yield v (taking (cnt - 1))) refl stopped)
 
 takingWhile :: forall a. (a -> Boolean) -> Process a a
 takingWhile p = go
   where
   go = encased
-         $ mkAwait' (\a -> if p a then encased (Yield a go) else stopped)
+         $ mkAwait (\a -> if p a then encased (Yield a go) else stopped)
            refl
            stopped
 
@@ -74,7 +74,7 @@ droppingWhile :: forall a. (a -> Boolean) -> Process a a
 droppingWhile p = go
   where
   go = encased
-       $ mkAwait' (\a -> if p a then go else encased (Yield a echo))
+       $ mkAwait (\a -> if p a then go else encased (Yield a echo))
          refl
          stopped
 
@@ -82,10 +82,10 @@ addProcess :: forall m b k c. Monad m => ProcessT m b c -> MachineT m k b -> Mac
 addProcess mp ma = MachineT $ unwrap mp >>= \v -> case v of
   Stop          -> pure Stop
   Yield o k     -> pure $ Yield o (k <~ ma)
-  Await be -> be # unAwait' \f (Refl leib) ff -> unwrap ma >>= \u -> case u of
+  Await be -> be # unAwait \f (Refl leib) ff -> unwrap ma >>= \u -> case u of
     Stop          -> unwrap $ ff <~ stopped
     Yield o k     -> unwrap $ f (coerceSymm leib o) <~ k
-    Await be'     -> be' # unAwait' \g kg fg -> pure $ mkAwait' (\a -> encased v <~ g a) kg (encased v <~ fg)
+    Await be'     -> be' # unAwait \g kg fg -> pure $ mkAwait' (\a -> encased v <~ g a) kg (encased v <~ fg)
 
 infixr 9 addProcess as <~
 
@@ -102,18 +102,18 @@ supply = foldr go id
     v <- unwrap m
     case v of
       Stop      -> pure Stop
-      Await be  -> be # unAwait' \f (Refl sym) _ -> unwrap $ r (f (coerceSymm sym x))
+      Await be  -> be # unAwait \f (Refl sym) _ -> unwrap $ r (f (coerceSymm sym x))
       Yield o k -> pure $ Yield o (go x r k)
 
 process :: forall m k i o. Monad m => (forall a. k a -> i -> a) -> MachineT m k o -> ProcessT m i o
 process f (MachineT m) = MachineT (map f' m) where
   f' (Yield o k) = Yield o (process f k)
   f' Stop        = Stop
-  f' (Await be)  = be # unAwait' \g kir h -> mkAwait' (process f <<< g <<< f kir) refl (process f h)
+  f' (Await be)  = be # unAwait \g kir h -> mkAwait (process f <<< g <<< f kir) refl (process f h)
 
 scan :: forall k b a. Category k => (a -> b -> a) -> a -> Machine (k b) a
 scan f s =
-  let step t = encased $ Yield t $ encased $ mkAwait' (step <<< f t) id stopped
+  let step t = encased $ Yield t $ encased $ mkAwait (step <<< f t) id stopped
   in step s
 
 scanMap :: forall k b a. Category k => Monoid b => (a -> b) -> Machine (k a) b
@@ -121,7 +121,7 @@ scanMap f = scan (\b a -> append b (f a)) mempty
 
 folding :: forall k b a. Category k => (a -> b -> a) -> a -> Machine (k b) a
 folding f s =
-  let step t = encased (mkAwait' (step <<< f t) id (encased (Yield t stopped)))
+  let step t = encased (mkAwait (step <<< f t) id (encased (Yield t stopped)))
   in  step s
 
 autoMealy :: forall m a b. Monad m => M.MealyT m a b -> ProcessT m a b

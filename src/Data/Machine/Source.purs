@@ -13,7 +13,7 @@ import Prelude
 import Control.Monad.Trans.Class (lift)
 
 import Data.Foldable (class Foldable, foldr, for_)
-import Data.Machine.Types ( MachineT(..), Machine, Step(..), encased, stopped, unAwait'
+import Data.Machine.Machine ( MachineT(..), Machine, Step(..), encased, stopped, unAwait
                           , construct)
 import Data.Machine.Process (Process, (<~))
 import Data.Machine.Plan (yield)
@@ -39,7 +39,7 @@ plug :: forall m k o. Monad m => MachineT m k o -> SourceT m o
 plug (MachineT m) = MachineT $ m >>= \x -> case x of
   Yield o k     -> pure (Yield o (plug k))
   Stop          -> pure Stop
-  Await ba      -> ba # unAwait' \_ _ h -> unwrap $ plug h
+  Await ba      -> ba # unAwait \_ _ h -> unwrap $ plug h
 
 unfold :: forall r a. (r -> Maybe (Tuple a r)) -> r -> Source a
 unfold k seed = construct (go seed)
