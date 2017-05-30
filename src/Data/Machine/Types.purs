@@ -31,7 +31,7 @@ mkAwait' :: forall k o r t. (t -> r) -> k t -> r -> Step k o r
 mkAwait' f g = Await <<< mkExists <<< Await' f g
 
 encased :: forall m k o. Applicative m => Step k o (MachineT m k o) -> MachineT m k o
-encased = MachineT <<< pure
+encased b = MachineT (pure b)
 
 stepMachine
   :: forall m k k' o o'
@@ -90,12 +90,19 @@ run = unwrap <<< runT
 stopped :: forall k b. Machine k b
 stopped = encased Stop
 
-fit :: forall k k' o m. Monad m => (k ~> k') -> MachineT m k o -> MachineT m k' o
+fit :: forall k k' o m. Functor m => (k ~> k') -> MachineT m k o -> MachineT m k' o
 fit f (MachineT m) = MachineT (f' <$> m)
   where
   f' (Yield o k)     = Yield o (fit f k)
   f' Stop            = Stop
   f' (Await b)       = b # unAwait' \g kir h -> mkAwait' (fit f <<< g) (f kir) (fit f h)
+
+fitM :: forall k o m n. Functor m => Functor n => (m ~> n) -> MachineT m k o -> MachineT n k o
+fitM f (MachineT m) = MachineT (f (map aux m))
+  where
+  aux Stop = Stop
+  aux (Yield o k) = Yield o (fitM f k)
+  aux (Await o)   = o # unAwait' \g kg gg -> mkAwait' (fitM f <<< g) kg (fitM f gg)
 
 construct :: forall k o m a. Monad m => PlanT k o m a -> MachineT m k o
 construct m = MachineT (runPlanT m
@@ -103,6 +110,15 @@ construct m = MachineT (runPlanT m
   (\o k -> pure (Yield o (MachineT k)))
   (\f k g -> pure (mkAwait' (MachineT <<< f) k (MachineT g)))
   (pure Stop))
+
+repeatedly :: forall k o m a. Monad m => PlanT k o m a -> MachineT m k o
+repeatedly = go
+  where
+  go m = MachineT $ runPlanT m
+    (const (unwrap (go m)))
+    (\o k -> pure (Yield o (MachineT k)))
+    (\f k g -> pure (mkAwait' (MachineT <<< f) k (MachineT g)))
+    (pure Stop)
 
 unfoldPlan :: forall k o m s. Monad m => s -> (s -> PlanT k o m s) -> MachineT m k o
 unfoldPlan s0 sp = r s0
@@ -112,3 +128,28 @@ unfoldPlan s0 sp = r s0
     (\o k -> pure (Yield o (MachineT k)))
     (\f k g -> pure (mkAwait' (MachineT <<< f) k (MachineT g)))
     (pure Stop)
+
+before :: forall k o m a. Monad m => MachineT m k o -> PlanT k o m a -> MachineT m k o
+before (MachineT n) m = MachineT $ runPlanT m
+  (const n)
+  (\o k -> pure (Yield o (MachineT k)))
+  (\f k g -> pure (mkAwait' (MachineT <<< f) k (MachineT g)))
+  (pure Stop)
+
+preplan :: forall k o m a. Monad m => PlanT k o m (MachineT m k o) -> MachineT m k o
+preplan m = MachineT $ runPlanT m
+  unwrap
+  (\o k -> pure (Yield o (MachineT k)))
+  (\f k g -> pure (mkAwait' (MachineT <<< f) k (MachineT g)))
+  (pure Stop)
+
+pass :: forall k o. k o -> Machine k o
+pass k = go
+  where
+  go = encased (mkAwait' (\t -> encased (Yield t go)) k stopped)
+
+starve :: forall m k k0 b. Monad m => MachineT m k0 b -> MachineT m k b -> MachineT m k b
+starve m cont = MachineT $ unwrap m >>= \v -> case v of
+  Stop      -> unwrap cont -- Continue with cont instead of stopping
+  Yield o r -> pure $ Yield o (starve r cont)
+  Await b   -> b # unAwait' \_ _ r -> unwrap (starve r cont)
