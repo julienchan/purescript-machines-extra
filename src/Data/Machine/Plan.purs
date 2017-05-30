@@ -1,13 +1,20 @@
 module Data.Machine.Plan
-  ( PlanT
+  ( PlanT(..)
   , Plan
+  , unPlanT
   , runPlanT
   , runPlan
+  , encased
   , yield
   , maybeYield
   , await
   , awaits
   , stop
+
+  , Step
+  , AwaitX
+  , mkAwait
+  , unAwait
   ) where
 
 import Prelude
@@ -67,7 +74,18 @@ awaits :: forall k o i. k i -> Plan k o i
 awaits h = PlanT \k -> mkAwait k h (defer \_ -> Stop)
 
 stop :: forall k o a. Plan k o a
-stop = empty
+stop = PlanT \_ -> Stop
+
+encased :: forall k o m r. Functor m => Step k o m r -> PlanT k o m r
+encased s = PlanT \k ->
+  let
+    go = case _ of
+      Stop      -> Stop
+      Done r    -> k r
+      Yield o l -> Yield o (map go l)
+      StepM ms  -> StepM (map go ms)
+      Await aw  -> aw # unAwait \ff kg fg -> mkAwait (go <<< ff) kg (map go fg)
+  in go s
 
 runPlanT
   :: forall k o m a r. Bind m
@@ -111,24 +129,26 @@ instance applicativePlanT :: Applicative (PlanT k o m) where
   pure a = PlanT \k -> k a
 
 instance bindPlanT :: Bind (PlanT k o m) where
-  bind (PlanT m) k = PlanT (\c -> m (\a -> unPlanT (k a) c))
+  bind (PlanT m) k = PlanT (\c -> m (\a -> case k a of PlanT ff -> ff c))
 
 instance monadPlanT :: Monad (PlanT k o m)
 
-instance altPlanT :: Alt (PlanT k o m) where
+instance altPlanT :: Functor m => Alt (PlanT k o m) where
   alt (PlanT m) (PlanT n) = PlanT \k ->
-    case m k of
-      Stop -> n k
-      r    -> r
+    let
+      go Stop       = n k
+      go (StepM ms) = StepM (map go ms)
+      go r          = r
+    in go (m k)
 
-instance plusPlanT :: Plus (PlanT k o m) where
+instance plusPlanT :: Functor m => Plus (PlanT k o m) where
   empty = PlanT \_ -> Stop
 
-instance alternativePlanT :: Alternative (PlanT k o m)
+instance alternativePlanT :: Functor m => Alternative (PlanT k o m)
 
-instance monadZeroPlanT :: MonadZero (PlanT k o m)
+instance monadZeroPlanT :: Functor m => MonadZero (PlanT k o m)
 
-instance monadPlusPlanT :: MonadPlus (PlanT k o m)
+instance monadPlusPlanT :: Functor m => MonadPlus (PlanT k o m)
 
 instance monadTransPlanT :: MonadTrans (PlanT k o) where
   lift m = PlanT \k -> StepM (k <$> m)
@@ -138,3 +158,13 @@ instance monadEffPlanT :: MonadEff eff m => MonadEff eff (PlanT k o m) where
 
 instance monadAffPlanT :: MonadAff eff m => MonadAff eff (PlanT k o m) where
   liftAff = lift <<< liftAff
+
+instance functorStep :: Functor m => Functor (Step k o m) where
+  map f = go
+    where
+    go = case _ of
+      Stop      -> Stop
+      Done r    -> Done (f r)
+      Yield o l -> Yield o (map go l)
+      StepM ms  -> StepM (map go ms)
+      Await aw  -> aw # unAwait \ff kg fg -> mkAwait (go <<< ff) kg (map go fg)

@@ -2,7 +2,6 @@ module Data.Machine.Source
   ( Source
   , SourceT
   , source
-  , cap
   , plug
   , unfold
   , unfoldT
@@ -12,12 +11,12 @@ import Prelude
 
 import Control.Monad.Trans.Class (lift)
 
-import Data.Foldable (class Foldable, foldr, for_)
-import Data.Machine.Machine ( MachineT(..), Machine, Step(..), encased, stopped, unAwait
+import Data.Foldable (class Foldable, foldr)
+import Data.Lazy (defer, force) as Z
+import Data.Machine.Internal ( MachineT(..), Machine, Step(..), encased, stopped, unAwait
                           , construct)
-import Data.Machine.Process (Process, (<~))
 import Data.Machine.Plan (yield)
-import Data.Maybe (Maybe)
+import Data.Maybe (Maybe(..))
 import Data.Newtype (unwrap)
 import Data.Tuple (Tuple(..))
 
@@ -30,29 +29,30 @@ type SourceT m b = forall k. MachineT m k b
 source :: forall f b. Foldable f => f b -> Source b
 source fb = foldr go stopped fb
   where
-    go x m = encased $ Yield x m
-
-cap :: forall a b. Process a b -> Source a -> Source b
-cap l r = l <~ r
+    go x m = encased $ Yield x (Z.defer \_ -> m)
 
 plug :: forall m k o. Monad m => MachineT m k o -> SourceT m o
 plug (MachineT m) = MachineT $ m >>= \x -> case x of
-  Yield o k     -> pure (Yield o (plug k))
+  Yield o k     -> pure (Yield o (map plug k))
   Stop          -> pure Stop
-  Await ba      -> ba # unAwait \_ _ h -> unwrap $ plug h
+  Await ba      -> ba # unAwait \_ _ h -> unwrap $ plug (Z.force h)
 
 unfold :: forall r a. (r -> Maybe (Tuple a r)) -> r -> Source a
 unfold k seed = construct (go seed)
   where
-  go r = for_ (k r) $ \(Tuple a r') -> do
-    _ <- yield a
-    go r'
+  go r = case k r of
+    Nothing -> pure unit
+    Just (Tuple a r') -> do
+      _ <- yield a
+      go r'
 
 unfoldT :: forall m r a. Monad m => (r -> m (Maybe (Tuple a r))) -> r -> SourceT m a
 unfoldT k seed = construct (go seed)
   where
-    go r = do
-      opt <- lift $ k r
-      for_ opt $ \(Tuple a r') -> do
+  go r = do
+    opt <- lift $ k r
+    case opt of
+      Nothing -> pure unit
+      Just (Tuple a r') -> do
         _ <- yield a
         go r'

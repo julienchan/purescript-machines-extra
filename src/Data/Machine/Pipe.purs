@@ -5,10 +5,12 @@ import Prelude
 import Control.Monad.Rec.Class (class MonadRec, Step(..), tailRecM) as Rec
 
 import Data.Machine.Plan (PlanT, awaits)
-import Data.Machine.Machine (MachineT(..), Step(..), construct, unAwait, mkAwait)
+import Data.Machine.Internal (MachineT(..), Step(..), construct, unAwait, mkAwait)
 import Data.Newtype (unwrap)
 import Data.Leibniz (type (~), coerceSymm)
 import Data.List (List(Nil), (:))
+import Data.Lazy (defer, force)
+
 
 data Exchange a' a b' b c
   = Request a' (c ~ a)
@@ -77,9 +79,14 @@ chainPush
 chainPush pm fb = MachineT $ unwrap pm >>= \p ->
   case p of
     Stop       -> pure Stop
-    Yield r n  -> pure $ Yield r (n >>~ fb)
+    Yield r n  -> pure $ Yield r (defer \_ -> force n >>~ fb)
     Await be   -> be # unAwait \k exc ff -> case exc of
-      Request a' pf -> pure $ mkAwait (\a -> k (coerceSymm pf a) >>~ fb) (Request a' id) (ff >>~ fb)
+      Request a' pf ->
+        pure $
+          mkAwait
+          (\a -> k (coerceSymm pf a) >>~ fb)
+          (Request a' id)
+          (defer \_ -> force ff >>~ fb)
       Respond b pf -> unwrap (k <<< coerceSymm pf +>> fb b)
 
 infixl 7 chainPush as >>~
@@ -103,10 +110,14 @@ chainPull
 chainPull fb' pm = MachineT $ unwrap pm >>= \p ->
   case p of
     Stop                   -> pure Stop
-    Yield r n              -> pure $ Yield r (fb' +>> n)
+    Yield r n              -> pure $ Yield r (defer \_ -> fb' +>> force n)
     Await be   -> be # unAwait \k exc ff -> case exc of
       Request b' pf -> unwrap (fb' b' >>~ coerceSymm pf >>> k)
-      Respond c  pf -> pure $ mkAwait (\c' -> fb' +>> k (coerceSymm pf c')) (Respond c id) (fb' +>> ff)
+      Respond c  pf -> pure $
+        mkAwait
+          (\c' -> fb' +>> k (coerceSymm pf c'))
+          (Respond c id)
+          (defer \_ -> fb' +>> force ff)
 
 infixl 6 chainPull as +>>
 
@@ -120,14 +131,14 @@ runEffect :: forall m o. Monad m => Effect m o -> m (List o)
 runEffect (MachineT m) = m >>= \v ->
   case v of
     Stop      -> pure Nil
-    Yield o n -> map ((:)o) (runEffect n)
-    Await ye   -> ye # unAwait' \_ y _ -> absurdExchange y
+    Yield o n -> map ((:)o) (runEffect $ force n)
+    Await ye   -> ye # unAwait \_ y _ -> absurdExchange y
 
 runEffect' :: forall m o. Monad m => Effect m o -> m Unit
 runEffect' (MachineT m) = m >>= \v ->
   case v of
     Stop      -> pure unit
-    Yield _ n -> runEffect' n
+    Yield _ n -> runEffect' $ force n
     Await be  -> be # unAwait \_ y _ -> absurdExchange y
 
 runEffectRec :: forall m o. Rec.MonadRec m => Effect m o -> m Unit
@@ -136,5 +147,5 @@ runEffectRec = Rec.tailRecM go
   go :: Effect m o -> m (Rec.Step (Effect m o) Unit)
   go (MachineT m) = m >>= \v -> case v of
     Stop -> pure (Rec.Done unit)
-    Yield _ n' -> pure (Rec.Loop n')
+    Yield _ n' -> pure (Rec.Loop $ force n')
     Await be  -> be # unAwait \_ y _ -> pure (Rec.Done (absurdExchange y))

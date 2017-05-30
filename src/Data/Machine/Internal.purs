@@ -1,4 +1,4 @@
-module Data.Machine.Machine where
+module Data.Machine.Internal where
 
 import Prelude
 
@@ -22,8 +22,8 @@ data AwaitX k o r t = AwaitX (t -> r) (k t) (Lazy r)
 
 instance functorStep :: Functor (Step k o) where
   map _ Stop            = Stop
-  map f (Yield o r)     = Yield o (f r)
-  map f (Await x)       = x # unAwait \g kg fg -> mkAwait (f <<< g) kg (f fg)
+  map f (Yield o r)     = Yield o (map f r)
+  map f (Await x)       = x # unAwait \g kg fg -> mkAwait (f <<< g) kg (map f fg)
 
 unAwait :: forall k o r a. (forall t. (t -> r) -> k t -> Lazy r -> a) -> Exists (AwaitX k o r) -> a
 unAwait f = runExists \(AwaitX g kg fg) -> f g kg fg
@@ -56,37 +56,45 @@ derive instance newtypeMachineT :: Newtype (MachineT m k o) _
 instance functorMachineT :: Functor m => Functor (MachineT m k) where
   map f (MachineT m) = MachineT (f' <$> m)
     where
-    f' (Yield o xs)    = Yield (f o) (f <$> xs)
-    f' (Await x)       = x # unAwait \k kir e -> mkAwait (map f <<< k) kir (map f <$> e)
+    f' (Yield o xs)    = Yield (f o) (map (map f) xs)
+    f' (Await x)       = x # unAwait \k kir e -> mkAwait (map f <<< k) kir (map (map f) e)
     f' Stop            = Stop
 
 instance semigroupMachineT :: Monad m => Semigroup (MachineT m k o) where
   append a b = stepMachine a $ \step -> case step of
-    Yield o a' -> encased (Yield o (append a' b))
+    Yield o a' -> encased (Yield o (defer \_ -> append (force a') b))
     Await ex   -> ex # unAwait \k kir e -> encased (mkAwait (\x -> k x <> b) kir (defer \_ -> force e <> b))
     Stop       -> b
 
 instance monoidMachineT :: Monad m => Monoid (MachineT m k o) where
   mempty = stopped
 
-runT_ :: forall m k b. MonadRec m => MachineT m k b -> m Unit
-runT_ = Rec.tailRecM go
+runRecT_ :: forall m k b. MonadRec m => MachineT m k b -> m Unit
+runRecT_ = Rec.tailRecM go
   where
-  go (MachineT m) = m <#> \v -> case v of
-    Stop      -> Rec.Done unit
-    Yield _ r -> Rec.Loop (force r)
-    Await x   -> x # unAwait \_ _ e -> Rec.Loop (force e)
+  go (MachineT m) = m >>= \v -> case v of
+    Stop      -> pure $ Rec.Done unit
+    Yield _ r -> pure $ Rec.Loop (force r)
+    Await x   -> x # unAwait \_ _ e -> pure $ Rec.Loop (force e)
 
-runT :: forall m k b. MonadRec m => MachineT m k b -> m (List b)
-runT = Rec.tailRecM2 go Nil
+runT_ :: forall m k b. Monad m => MachineT m k b -> m Unit
+runT_ = go
+  where
+  go (MachineT m) = m >>= \v -> case v of
+    Stop      -> pure unit
+    Yield _ r -> go (force r)
+    Await x   -> x # unAwait \_ _ e -> go (force e)
+
+runRecT :: forall m k b. MonadRec m => MachineT m k b -> m (List b)
+runRecT = Rec.tailRecM2 go Nil
   where
   go x (MachineT m) = m >>= \v -> case v of
     Stop        -> pure $ Rec.Done (reverse x)
     Yield o k   -> pure $ Rec.Loop {a: (o:x), b: force k }
     Await b     -> b # unAwait \_ _ e -> pure (Rec.Loop {a: x, b: force e})
 
-run :: forall k b. MachineT Identity k b -> List b
-run = unwrap <<< runT
+runRec :: forall k b. MachineT Identity k b -> List b
+runRec = unwrap <<< runRecT
 
 stopped :: forall k b. Machine k b
 stopped = encased Stop
@@ -108,17 +116,17 @@ fitM f (MachineT m) = MachineT (f (map aux m))
 construct :: forall k o m a. Monad m => PlanT k o m a -> MachineT m k o
 construct m = MachineT (runPlanT m
   (const (pure Stop))
-  (\o k -> pure (Yield o (MachineT k)))
-  (\f k g -> pure (mkAwait (MachineT <<< f) k (MachineT g)))
+  (\o k -> pure (Yield o (defer \_ -> MachineT $ force k)))
+  (\f k g -> pure (mkAwait (MachineT <<< f) k (defer \_ -> MachineT $ force g)))
   (pure Stop))
 
-repeatedly :: forall k o m a. Monad m => PlanT k o m a -> MachineT m k o
+repeatedly :: forall k o m a. MonadRec m => PlanT k o m a -> MachineT m k o
 repeatedly = go
   where
   go m = MachineT $ runPlanT m
-    (const (unwrap (go m)))
-    (\o k -> pure (Yield o (MachineT k)))
-    (\f k g -> pure (mkAwait (MachineT <<< f) k (MachineT g)))
+    (\_ -> unwrap (go m))
+    (\o k -> pure (Yield o (defer \_ -> MachineT $ force k)))
+    (\f k g -> pure (mkAwait (MachineT <<< f) k (defer \_ -> MachineT $ force g)))
     (pure Stop)
 
 unfoldPlan :: forall k o m s. Monad m => s -> (s -> PlanT k o m s) -> MachineT m k o
@@ -126,28 +134,28 @@ unfoldPlan s0 sp = r s0
   where
   r s = MachineT $ runPlanT (sp s)
     (\sx -> unwrap $ r sx)
-    (\o k -> pure (Yield o (MachineT k)))
-    (\f k g -> pure (mkAwait (MachineT <<< f) k (MachineT g)))
+    (\o k -> pure (Yield o (defer \_ -> MachineT $ force k)))
+    (\f k g -> pure (mkAwait (MachineT <<< f) k (defer \_ -> MachineT $ force g)))
     (pure Stop)
 
 before :: forall k o m a. Monad m => MachineT m k o -> PlanT k o m a -> MachineT m k o
 before (MachineT n) m = MachineT $ runPlanT m
   (const n)
-  (\o k -> pure (Yield o (MachineT k)))
-  (\f k g -> pure (mkAwait (MachineT <<< f) k (MachineT g)))
+  (\o k -> pure (Yield o (defer \_ -> MachineT $ force k)))
+  (\f k g -> pure (mkAwait (MachineT <<< f) k (defer \_ -> MachineT $ force g)))
   (pure Stop)
 
 preplan :: forall k o m. Monad m => PlanT k o m (MachineT m k o) -> MachineT m k o
 preplan m = MachineT $ runPlanT m
   unwrap
-  (\o k -> pure (Yield o (MachineT k)))
-  (\f k g -> pure (mkAwait (MachineT <<< f) k (MachineT g)))
+  (\o k -> pure (Yield o (defer \_ -> MachineT $ force k)))
+  (\f k g -> pure (mkAwait (MachineT <<< f) k (defer \_ -> MachineT $ force g)))
   (pure Stop)
 
 pass :: forall k o. k o -> Machine k o
 pass k = go
   where
-  go = encased (mkAwait (\t -> encased (Yield t go)) k stopped)
+  go = encased (mkAwait (\t -> encased (Yield t (defer \_ -> go))) k (defer \_ -> stopped))
 
 starve :: forall m k k0 b. Monad m => MachineT m k0 b -> MachineT m k b -> MachineT m k b
 starve m cont = MachineT $ unwrap m >>= \v -> case v of
