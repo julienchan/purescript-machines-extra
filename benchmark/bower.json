@@ -1,0 +1,19 @@
+{
+  "name": "purescript-conduit",
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "output"
+  ],
+  "dependencies": {
+    "purescript-catenable-lists": "^4.0.0",
+    "purescript-exists": "^3.0.0",
+    "purescript-transformers": "^3.0.0",
+    "purescript-unsafe-coerce": "^3.0.0",
+    "purescript-sequences": "git://github.com/syaiful6/purescript-sequences.git#5d6d834"
+  },
+  "devDependencies": {
+    "purescript-psci-support": "^3.0.0"
+  }
+}
