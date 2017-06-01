@@ -9,13 +9,11 @@ module Data.Machine.Source
 
 import Prelude
 
-import Control.Monad.Trans.Class (lift)
+import Control.Monad.Rec.Class as Rec
 
 import Data.Foldable (class Foldable, foldr)
 import Data.Lazy (defer, force) as Z
-import Data.Machine.Internal ( MachineT(..), Machine, Step(..), encased, stopped, unAwait
-                          , construct)
-import Data.Machine.Plan (yield)
+import Data.Machine.Internal ( MachineT(..), Machine, Step(..), encased, stopped, unAwait)
 import Data.Maybe (Maybe(..))
 import Data.Newtype (unwrap)
 import Data.Tuple (Tuple(..))
@@ -37,22 +35,24 @@ plug (MachineT m) = MachineT $ m >>= \x -> case x of
   Stop          -> pure Stop
   Await ba      -> ba # unAwait \_ _ h -> unwrap $ plug (Z.force h)
 
+plugRec :: forall m k o. Rec.MonadRec m => MachineT m k o -> SourceT m o
+plugRec m0 = MachineT $ Rec.tailRecM go m0
+  where
+  go m = unwrap m >>= \x -> case x of
+    Yield o k -> pure $ Rec.Done $ (Yield o (map plug k))
+    Stop      -> pure $ Rec.Done Stop
+    Await ba  -> ba # unAwait \_ _ h -> pure $ Rec.Loop (Z.force h)
+
 unfold :: forall r a. (r -> Maybe (Tuple a r)) -> r -> Source a
-unfold k seed = construct (go seed)
+unfold k seed = MachineT $ go seed
   where
   go r = case k r of
-    Nothing -> pure unit
-    Just (Tuple a r') -> do
-      _ <- yield a
-      go r'
+    Nothing           -> pure Stop
+    Just (Tuple a r') -> pure $ Yield a (Z.defer \_ -> MachineT $ go r')
 
 unfoldT :: forall m r a. Monad m => (r -> m (Maybe (Tuple a r))) -> r -> SourceT m a
-unfoldT k seed = construct (go seed)
+unfoldT k seed = MachineT $ go seed
   where
-  go r = do
-    opt <- lift $ k r
-    case opt of
-      Nothing -> pure unit
-      Just (Tuple a r') -> do
-        _ <- yield a
-        go r'
+  go r = k r >>= \x -> case x of
+    Nothing -> pure Stop
+    Just (Tuple a r') -> pure $ Yield a (Z.defer \_ -> MachineT $ go r')
