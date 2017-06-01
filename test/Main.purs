@@ -9,11 +9,12 @@ import Control.Monad.Eff.Class (liftEff)
 import Control.Monad.Eff.Console (CONSOLE, logShow, log)
 import Control.Monad.Trans.Class (lift)
 
+import Data.Array ((..))
 import Data.Foldable (for_)
 import Data.Machine.Plan (PlanT, yield, await)
 import Data.Machine.Internal (runRecT_, runRec, construct, repeatedly)
-import Data.Machine.Process (ProcessT, (<~))
-import Data.Machine.Source (unfoldT, SourceT)
+import Data.Machine.Process (ProcessT, (<~), mapping)
+import Data.Machine.Source (SourceT, unfoldT, source)
 import Data.Machine.Pipe (Server', Client', request, respond, runEffectRec, (>>~))
 import Data.Maybe (Maybe(..))
 import Data.Tuple (Tuple(..))
@@ -109,6 +110,7 @@ clientPipe = construct go
 
 main :: forall eff. Eff (exception :: EXCEPTION, console :: CONSOLE | eff) Unit
 main = void $ launchAff do
-  runEffectRec $ serverPipe >>~ const clientPipe
-  liftEff $ logShow (runRec (construct simples))
-  runRecT_ $ printer <~ nats 0
+  -- runEffectRec $ serverPipe >>~ const clientPipe
+  runRecT_ $ mapping (add 1) <~ source (1..1000)
+  -- liftEff $ logShow (runRec (construct simples))
+  -- runRecT_ $ printer <~ nats 0

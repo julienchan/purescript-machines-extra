@@ -13,6 +13,7 @@ module Data.Machine.Process
   , supply
   , process
   , scan
+  , mapping
   , scanMap
   , folding
   ) where
@@ -137,6 +138,11 @@ folding :: forall k b a. Category k => (a -> b -> a) -> a -> Machine (k b) a
 folding f s =
   let step t = encased (mkAwait (step <<< f t) id (Z.defer \_ -> encased (Yield t $ Z.defer \_ -> stopped)))
   in  step s
+
+mapping :: forall k a b. Category k => (a -> b) -> Machine (k a) b
+mapping f = go
+  where
+  go = encased (mkAwait (\t -> encased (Yield (f t) (Z.defer \_ -> go))) id (Z.defer \_ -> stopped))
 
 autoMealy :: forall m a b. Monad m => M.MealyT m a b -> ProcessT m a b
 autoMealy = construct <<< go
