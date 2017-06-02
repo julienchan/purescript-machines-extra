@@ -32,7 +32,6 @@ import Data.Machine.Is (Is(..), refl)
 import Data.Lazy (defer, force) as Z
 import Data.Leibniz (coerceSymm)
 import Data.Machine.Plan (yield, await, stop)
-import Data.Machine.Mealy as M
 import Data.Monoid (class Monoid, mempty)
 import Data.Newtype (unwrap)
 
@@ -143,15 +142,3 @@ mapping :: forall k a b. Category k => (a -> b) -> Machine (k a) b
 mapping f = go
   where
   go = encased (mkAwait (\t -> encased (Yield (f t) (Z.defer \_ -> go))) id (Z.defer \_ -> stopped))
-
-autoMealy :: forall m a b. Monad m => M.MealyT m a b -> ProcessT m a b
-autoMealy = construct <<< go
-  where
-  go mealy = do
-    v <- await
-    s <- lift $ M.stepMealy v mealy
-    case s of
-      M.Emit b mealy' -> do
-        _ <- yield b
-        go mealy'
-      M.Halt -> stop

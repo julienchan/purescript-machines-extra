@@ -16,7 +16,7 @@ import Data.Identity (Identity)
 data Step k o r
   = Stop
   | Yield o (Lazy r)
-  | Await (Exists (AwaitX k o r))
+  | Await (Exists (AwaitX k o r)) -- forall t. (t -> r) (k t) r
 
 data AwaitX k o r t = AwaitX (t -> r) (k t) (Lazy r)
 

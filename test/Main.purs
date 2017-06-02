@@ -21,6 +21,8 @@ import Data.Tuple (Tuple(..))
 import Data.Newtype (wrap)
 import Data.Function.Uncurried (Fn3, runFn3)
 
+import Test.Data.Machine.Internal.FreePlus as FP
+
 --------------------------------------------------------------------------------
 -- Readline --------------------------------------------------------------------
 --------------------------------------------------------------------------------
@@ -110,7 +112,8 @@ clientPipe = construct go
 
 main :: forall eff. Eff (exception :: EXCEPTION, console :: CONSOLE | eff) Unit
 main = void $ launchAff do
-  -- runEffectRec $ serverPipe >>~ const clientPipe
+  FP.main
+  runEffectRec $ serverPipe >>~ const clientPipe
   runRecT_ $ mapping (add 1) <~ source (1..1000)
-  -- liftEff $ logShow (runRec (construct simples))
-  -- runRecT_ $ printer <~ nats 0
+  liftEff $ logShow (runRec (construct simples))
+  runRecT_ $ printer <~ nats 0

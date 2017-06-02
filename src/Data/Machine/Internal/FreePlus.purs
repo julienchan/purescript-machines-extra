@@ -1,4 +1,16 @@
-module Data.Conduit.Internal.FreePlus where
+module Data.Machine.Internal.FreePlus
+  ( FreePlus
+  , ChoicesView(..)
+  , EffectView(..)
+  , liftF
+  , suspendF
+  , hoistFree
+  , foldFree
+  , runFreeM
+  , substFree
+  , toView
+  , fromView
+  ) where
 
 import Prelude
 
@@ -16,6 +28,7 @@ import Data.Tuple (Tuple(..))
 
 import Unsafe.Coerce (unsafeCoerce)
 
+-- | a Free Monad Plus
 data FreePlus f a
   = FreePlus (S.Seq (FreePlus f Val)) (C.CatList (ExpF f))
   | FImpure (f (FreePlus f a))
@@ -38,10 +51,25 @@ data Val
 liftF :: forall f. Functor f => f ~> FreePlus f
 liftF f = FImpure (FPure <$> f)
 
+-- | suspend a functor to FreePlus
+suspendF :: forall f a. f (FreePlus f a) -> FreePlus f a
+suspendF = FImpure
+
+-- | Use a natural transformation to change the generating type constructor of a
+-- | free monad.
 hoistFree :: forall f g. Functor f => Functor g => (f ~> g) -> FreePlus f ~> FreePlus g
 hoistFree k = substFree (liftF <<< k)
 
-runFreePlusM
+foldFree :: forall f m. Functor f => MonadRec m => MonadPlus m => (f ~> m) -> FreePlus f ~> m
+foldFree k = tailRecM go
+  where
+  go :: forall a. FreePlus f a -> m (Step (FreePlus f a) a)
+  go f = case toView f of
+    MZero               -> empty
+    MPlus (Pure a) _    -> Done <$> pure a
+    MPlus (Impure ff) g -> Loop <$> (k ff <|> pure g)
+
+runFreeM
   :: forall f m a
    . Functor f
   => MonadRec m
@@ -49,12 +77,12 @@ runFreePlusM
   => (f (FreePlus f a) -> m (FreePlus f a))
   -> FreePlus f a
   -> m a
-runFreePlusM k = tailRecM go
+runFreeM k = tailRecM go
   where
   go :: FreePlus f a ->  m (Step (FreePlus f a) a)
   go f = case toView f of
-    MZero -> Done <$> empty
-    MPlus (Pure a) g -> pure a $> Loop g
+    MZero               -> Done <$> empty
+    MPlus (Pure a) g    -> Done <$> pure a
     MPlus (Impure ff) g -> Loop <$> (k ff <|> pure g)
 
 substFree :: forall f g. Functor f => (f ~> FreePlus g) -> FreePlus f ~> FreePlus g
