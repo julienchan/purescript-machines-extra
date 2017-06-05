@@ -23,6 +23,7 @@ import Data.Machine.Source as M
 import Data.Machine.Internal as M
 import Data.Machine.Plan as MP
 import Benchmark.Machine.Plan as OP
+import Data.Machine.Machine as FP
 
 import Pipes.Prelude as P
 import Pipes as P
@@ -64,14 +65,18 @@ leftBindSmallPlanT = mkBenchmark $
   , gen: \n -> vectorOf n arbitrary
   , functions: [ benchFn "Plan simple" (M.runRecT_ <<< constructOl <<< bindsOl)
                , benchFn "Plan codensity" (M.runRecT_ <<< M.construct <<< binds)
+               , benchFn "Plan unify" (FP.runRecT_ <<< bindsUnify)
                ]
   }
   where
-  binds :: forall k. Array Int -> MP.PlanT k Int Identity Unit
+  binds :: forall e k. Array Int -> MP.PlanT k Int (Aff e) Unit
   binds as = F.foldl (\b a -> b >>= const (MP.yield a)) (MP.yield 1) as
 
-  bindsOl :: forall k. Array Int -> OP.PlanT k Int Identity Unit
+  bindsOl :: forall e k. Array Int -> OP.PlanT k Int (Aff e) Unit
   bindsOl as = F.foldl (\b a -> b >>= const (OP.yield a)) (OP.yield 1) as
+
+  bindsUnify :: forall e k. Array Int -> FP.MachineT k Int (Aff e) Unit
+  bindsUnify as = F.foldl (\b a -> b >>= const (FP.yield a)) (FP.yield 1) as
 
 -- | Pipe doesn't stack safe
 benchMapping :: Benchmark
@@ -93,4 +98,6 @@ benchMapping = mkBenchmark $
     v <- Co.await
     pure unit
 
-main = runSuite [benchMapping, leftBindSmallPlanT]
+main = runSuite [ benchMapping
+                , leftBindSmallPlanT
+                ]

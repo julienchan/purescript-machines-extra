@@ -3,7 +3,7 @@ module Data.Machine.Internal.FreePlus
   , ChoicesView(..)
   , EffectView(..)
   , liftF
-  , suspendF
+  , wrapF
   , hoistFree
   , foldFree
   , runFreeM
@@ -22,7 +22,6 @@ import Control.Monad.Trans.Class (class MonadTrans)
 import Control.MonadPlus (class MonadZero, class MonadPlus)
 
 import Data.CatList as C
-import Data.Sequence as S
 import Data.Maybe (Maybe(..))
 import Data.Tuple (Tuple(..))
 
@@ -30,7 +29,7 @@ import Unsafe.Coerce (unsafeCoerce)
 
 -- | a Free Monad Plus
 data FreePlus f a
-  = FreePlus (S.Seq (FreePlus f Val)) (C.CatList (ExpF f))
+  = FreePlus (C.CatList (FreePlus f Val)) (C.CatList (ExpF f))
   | FImpure (f (FreePlus f a))
   | FPure a
 
@@ -52,8 +51,8 @@ liftF :: forall f. Functor f => f ~> FreePlus f
 liftF f = FImpure (FPure <$> f)
 
 -- | suspend a functor to FreePlus
-suspendF :: forall f a. f (FreePlus f a) -> FreePlus f a
-suspendF = FImpure
+wrapF :: forall f a. f (FreePlus f a) -> FreePlus f a
+wrapF = FImpure
 
 -- | Use a natural transformation to change the generating type constructor of a
 -- | free monad.
@@ -91,23 +90,23 @@ substFree k = go
   go :: FreePlus f ~> FreePlus g
   go f = case toView f of
     MZero               -> empty
-    MPlus (Pure a) g    -> pure a <|> go g
-    MPlus (Impure fs) g -> k fs >>= \x -> go (x <|> g)
+    MPlus (Pure a) g    -> pure a >>= \x -> go (pure x <|> g)
+    MPlus (Impure fs) g -> k fs   >>= \x -> go (x <|> g)
 
 toView :: forall f a. Functor f => FreePlus f a -> ChoicesView f a
 toView = go
   where
   go (FPure x)      = MPlus (Pure x) empty
   go (FImpure x)    = MPlus (Impure x) empty
-  go (FreePlus m f) = case S.uncons m of
+  go (FreePlus m f) = case C.uncons m of
     Nothing          -> MZero
     Just (Tuple h t) -> case go $ unsafeCoerceFree h of
       MZero          -> go (unsafeCoerceFree $ FreePlus t f)
       MPlus ch ct ->
-        let rest = FreePlus (unsafeCoerceFree' ct `S.cons` t) f
+        let rest = FreePlus (unsafeCoerceFree' ct `C.cons` t) f
         in case ch of
           Impure xx -> MPlus (Impure (map (\yy -> bindFree yy f) xx)) rest
-          Pure x   -> case C.uncons f of
+          Pure x    -> case C.uncons f of
             Nothing -> MPlus (Pure x) rest
             Just (Tuple hc tc) ->
               go $ bindFree (unsafeCoerceFree $ runExpF hc $ unsafeCoerceVal' x) tc <|> rest
@@ -129,9 +128,7 @@ toView = go
 
 bindFree :: forall f a b. FreePlus f a -> C.CatList (ExpF f) -> FreePlus f b
 bindFree (FreePlus m r) f = FreePlus m (r <> f)
-bindFree m f = case C.uncons f of
-  Nothing -> unsafeCoerceM m
-  _       -> FreePlus (S.singleton (unsafeCoerceFree m)) f
+bindFree m f = if C.null f then unsafeCoerceM m else FreePlus (catSingle (unsafeCoerceFree m)) f
   where
   unsafeCoerceM :: FreePlus f a -> FreePlus f b
   unsafeCoerceM = unsafeCoerce
@@ -170,17 +167,17 @@ instance monadFreePluss :: Monad (FreePlus f)
 instance altFreePlus :: Alt (FreePlus f) where
   alt x0 y0 = case x0, y0 of
     x@(FreePlus ml cl), y@(FreePlus mr cr) ->
-      case C.uncons cl, C.uncons cr of
-        Nothing, Nothing -> FreePlus (ml `S.append` mr) C.empty
-        _, _ -> FreePlus (S.singleton (unsafeAlt x) `S.snoc` unsafeAlt y) C.empty
-    xx, yy -> FreePlus (S.singleton (unsafeAlt xx) `S.snoc` (unsafeAlt yy)) C.empty
+      case C.null cl, C.null cr of
+        true, true -> FreePlus (ml `C.append` mr) C.empty
+        _, _       -> FreePlus (catSingle (unsafeAlt x) `C.snoc` unsafeAlt y) C.empty
+    xx, yy -> FreePlus (catSingle (unsafeAlt xx) `C.snoc` (unsafeAlt yy)) C.empty
 
     where
       unsafeAlt :: forall a. FreePlus f a -> FreePlus f Val
       unsafeAlt = unsafeCoerce
 
 instance plusFreePlus :: Plus (FreePlus f) where
-  empty = FreePlus S.empty C.empty
+  empty = FreePlus C.empty C.empty
 
 instance alternativeFreePlus :: Alternative (FreePlus f)
 
